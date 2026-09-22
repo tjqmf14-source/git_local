@@ -139,3 +139,8 @@ finally {
     $env:GITLOCAL_GIT_EXE = $oldGitExe
     if (Test-Path -LiteralPath $base) { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
+# Expected failure tests invoke Git with non-zero exit codes. A successful QA run
+# must explicitly reset the process result instead of leaking LASTEXITCODE.
+$global:LASTEXITCODE = 0
+exit 0
