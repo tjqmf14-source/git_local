@@ -24,9 +24,11 @@ function Assert-Throws([scriptblock]$action,[string]$name) {
 
 $tokens=$null; $errors=$null
 [System.Management.Automation.Language.Parser]::ParseFile($modulePath,[ref]$tokens,[ref]$errors) | Out-Null
+if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ("CORE PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber,$_.Message) } }
 Assert-Equal $errors.Count 0 'Core PowerShell syntax'
 $tokens=$null; $errors=$null
 [System.Management.Automation.Language.Parser]::ParseFile($appPath,[ref]$tokens,[ref]$errors) | Out-Null
+if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ("UI PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber,$_.Message) } }
 Assert-Equal $errors.Count 0 'UI PowerShell syntax'
 
 Import-Module $modulePath -Force
