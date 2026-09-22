@@ -1,4 +1,4 @@
-param()
+param([switch]$SelfTest)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -52,7 +52,6 @@ $top.SetColumnSpan($nameBox,3)
 
 $repoBox = New-Object System.Windows.Forms.TextBox
 $repoBox.Dock = 'Fill'
-$repoBox.PlaceholderText = 'https://github.com/owner/repo'
 $top.Controls.Add($repoBox,1,1)
 $top.SetColumnSpan($repoBox,3)
 
@@ -230,5 +229,11 @@ $form.Add_Shown({
         Refresh-Grid
     } catch { Show-Error $_.Exception }
 })
+
+if ($SelfTest) {
+    Resolve-GitLocalGitExecutable | Out-Null
+    Write-Output 'GITLOCAL_UI_SELFTEST_OK'
+    return
+}
 
 [System.Windows.Forms.Application]::Run($form)
