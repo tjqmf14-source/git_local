@@ -31,6 +31,7 @@ function Invoke-GitLocalGit {
 
     $git = Resolve-GitLocalGitExecutable
     $pushed = $false
+    $previousErrorActionPreference = $ErrorActionPreference
     try {
         if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
             if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
@@ -39,11 +40,20 @@ function Invoke-GitLocalGit {
             Push-Location -LiteralPath $WorkingDirectory
             $pushed = $true
         }
+
+        # Windows PowerShell 5.1 can promote a native program's stderr to
+        # NativeCommandError when ErrorActionPreference is Stop, even if the
+        # program exits successfully. Git writes normal progress to stderr.
+        # Capture both streams and trust Git's process exit code instead.
+        $ErrorActionPreference = 'Continue'
         $raw = & $git @Arguments 2>&1
         $exitCode = $LASTEXITCODE
         $output = ($raw | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
     }
-    finally { if ($pushed) { Pop-Location } }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($pushed) { Pop-Location }
+    }
 
     if ($exitCode -ne 0 -and -not $AllowFailure) {
         $safeArgs = ($Arguments -join ' ')
