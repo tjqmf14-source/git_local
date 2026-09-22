@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function Get-GitLocalConfigRoot {
     if (-not [string]::IsNullOrWhiteSpace($env:GITLOCAL_CONFIG_HOME)) {
