@@ -96,7 +96,7 @@ function Read-GitLocalConfig {
         if ([string]::IsNullOrWhiteSpace($raw)) { throw '설정 파일이 비어 있습니다.' }
         $config = $raw | ConvertFrom-Json
     } catch { throw ("설정 파일을 읽을 수 없습니다: {0}{1}{2}" -f $path,[Environment]::NewLine,$_.Exception.Message) }
-    if ($null -eq $config.projects) { $config | Add-Member projects @() }
+    if ($null -eq $config.projects) { $config | Add-Member -NotePropertyName projects -NotePropertyValue @() }
     return $config
 }
 
