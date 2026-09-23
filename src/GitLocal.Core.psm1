@@ -231,9 +231,10 @@ function Get-GitLocalProjectStatus {
 
     $branch=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--show-current') -AllowFailure).Output.Trim()
     $dirty=-not [string]::IsNullOrWhiteSpace((Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('status','--porcelain')).Output)
-    $remote=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('remote','get-url','origin') -AllowFailure).Output.Trim()
+    $remoteResult=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('remote','get-url','origin') -AllowFailure
+    $hasOrigin=($remoteResult.ExitCode -eq 0)
+    $remote=if ($hasOrigin) { $remoteResult.Output.Trim() } else { '' }
     $detached=[string]::IsNullOrWhiteSpace($branch)
-    $hasOrigin=-not [string]::IsNullOrWhiteSpace($remote)
     $ahead=0; $behind=0
     $up=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--abbrev-ref','--symbolic-full-name','@{u}') -AllowFailure
     if ($up.ExitCode -eq 0) {

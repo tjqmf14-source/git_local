@@ -50,7 +50,33 @@ jobs:
           $zip = @(Get-ChildItem .\dist\GitLocal-*-win-x64.zip)
           $sha = @(Get-ChildItem .\dist\GitLocal-*-win-x64.sha256.txt)
           if ($zip.Count -ne 1 -or $sha.Count -ne 1) { throw 'Expected package outputs were not generated.' }
-          Get-Content $sha[0].FullName
+          if ($zip[0].Length -le 0 -or $sha[0].Length -le 0) { throw 'Package output is empty.' }
+
+          $expected = ((Get-Content $sha[0].FullName -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $zip[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($expected -ne $actual) { throw "SHA-256 mismatch. expected=$expected actual=$actual" }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip[0].FullName)
+          try {
+            $entries = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\','/') })
+            $required = @(
+              'GitLocal.exe',
+              'Git_Local_START.cmd',
+              'README.md',
+              'src/GitLocal.App.ps1',
+              'src/GitLocal.Core.psm1',
+              'assets/GitLocal.ico'
+            )
+            foreach ($item in $required) {
+              if ($entries -notcontains $item) { throw "Required package entry missing: $item" }
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+          Write-Host "PACKAGE_SHA256=$actual"
 
       - name: Upload QA package
         uses: actions/upload-artifact@v4
