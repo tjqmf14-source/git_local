@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev/v1-universal-sync
+      - 'qa/**'
   pull_request:
     branches:
       - main

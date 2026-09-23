@@ -231,7 +231,12 @@ function Get-GitLocalProjectStatus {
 
     $branch=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--show-current') -AllowFailure).Output.Trim()
     $dirty=-not [string]::IsNullOrWhiteSpace((Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('status','--porcelain')).Output)
-    $remote=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('remote','get-url','origin') -AllowFailure).Output.Trim()
+    $remoteResult=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('remote','get-url','origin') -AllowFailure
+    $remote=if ($remoteResult.ExitCode -eq 0) { $remoteResult.Output.Trim() } else { '' }
+    $headProbe=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--verify','HEAD') -AllowFailure
+    if ($headProbe.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($branch)) {
+        return [pscustomobject]@{State='detached';Branch='';Dirty=$dirty;Ahead=0;Behind=0;Remote=$remote;Message='detached HEAD 상태'}
+    }
     $ahead=0; $behind=0
     $up=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--abbrev-ref','--symbolic-full-name','@{u}') -AllowFailure
     if ($up.ExitCode -eq 0) {
@@ -255,7 +260,7 @@ function Update-GitLocalProjectFromRemote {
     param([Parameter(Mandatory=$true)][object]$Project)
     $path=[string]$Project.localPath
     $status=Get-GitLocalProjectStatus $Project
-    if ($status.State -in @('missing','not-git')) { throw "프로젝트 폴더 상태가 올바르지 않습니다: $($status.Message)" }
+    if ($status.State -in @('missing','not-git','detached')) { throw "프로젝트 폴더 상태가 올바르지 않습니다: $($status.Message)" }
     if ($status.Dirty) { throw '로컬 변경사항이 있어 가져오기를 중단했습니다. 먼저 커밋하거나 변경사항을 정리하세요.' }
 
     Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('fetch','origin','--prune') | Out-Null
@@ -283,7 +288,7 @@ function Publish-GitLocalProject {
 
     $path=[string]$Project.localPath
     $status=Get-GitLocalProjectStatus $Project
-    if ($status.State -in @('missing','not-git')) { throw "프로젝트 폴더 상태가 올바르지 않습니다: $($status.Message)" }
+    if ($status.State -in @('missing','not-git','detached')) { throw "프로젝트 폴더 상태가 올바르지 않습니다: $($status.Message)" }
     $changes=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('status','--porcelain')).Output
     if ([string]::IsNullOrWhiteSpace($changes)) { return [pscustomobject]@{Result='no-changes';Branch=$status.Branch} }
 
