@@ -28,8 +28,8 @@ Copy-Item -LiteralPath (Join-Path $root 'src') -Destination $packageDir -Recurse
 Copy-Item -LiteralPath (Join-Path $root 'assets') -Destination $packageDir -Recurse
 
 $packageExe = Join-Path $packageDir 'GitLocal.exe'
-& $packageExe --self-test
-if ($LASTEXITCODE -ne 0) { throw "Packaged EXE self-test failed: $LASTEXITCODE" }
+$exeSelfTest = Start-Process -FilePath $packageExe -ArgumentList '--self-test' -Wait -PassThru
+if ($exeSelfTest.ExitCode -ne 0) { throw "Packaged EXE self-test failed: $($exeSelfTest.ExitCode)" }
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $packageDir 'src\GitLocal.App.ps1') -SelfTest
 if ($LASTEXITCODE -ne 0) { throw "Packaged UI self-test failed: $LASTEXITCODE" }
