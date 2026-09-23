@@ -188,6 +188,9 @@ try {
     $brokenProject = [pscustomobject]@{ id='broken'; name='broken'; localPath=$broken; repositoryUrl='broken'; branch='main' }
     Assert-Throws { Update-GitLocalProjectFromRemote -Project $brokenProject | Out-Null } 'Unreachable remote error handling'
 
+    Remove-GitLocalProject -Id $reg.Project.id | Out-Null
+    Assert-Equal @(Get-GitLocalProjects).Count 0 'Remove final project persistence'
+
     Write-Host ''
     Write-Host 'ALL CORE QA TESTS PASSED' -ForegroundColor Green
 }
