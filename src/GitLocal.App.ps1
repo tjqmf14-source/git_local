@@ -280,6 +280,8 @@ if ($SelfTest) {
         [System.Windows.Forms.Application]::DoEvents()
         if ($grid.Rows.Count -ne 1) { throw "등록 버튼 실행 후 프로젝트 행 수가 올바르지 않습니다: $($grid.Rows.Count)" }
         if (@(Get-GitLocalProjects).Count -ne 1) { throw '등록 버튼 실행 결과가 설정에 저장되지 않았습니다.' }
+        Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('config','user.name','GitLocal UI QA') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('config','user.email','ui-qa@example.invalid') | Out-Null
 
         $grid.ClearSelection()
         $grid.Rows[0].Selected = $true
