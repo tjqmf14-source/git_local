@@ -22,7 +22,7 @@ if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
 }
 
 $top = New-Object System.Windows.Forms.TableLayoutPanel
-$top.Dock = 'Top'
+$top.Dock = 'Fill'
 $top.Height = 128
 $top.ColumnCount = 4
 $top.RowCount = 3
@@ -91,7 +91,7 @@ $grid.Columns['State'].FillWeight = 20
 $grid.Columns['Path'].FillWeight = 50
 
 $buttonPanel = New-Object System.Windows.Forms.FlowLayoutPanel
-$buttonPanel.Dock = 'Bottom'
+$buttonPanel.Dock = 'Fill'
 $buttonPanel.Height = 52
 $buttonPanel.FlowDirection = 'LeftToRight'
 $buttonPanel.Padding = New-Object System.Windows.Forms.Padding(10,8,10,8)
@@ -112,7 +112,7 @@ $openButton = New-ActionButton '폴더 열기'
 $removeButton = New-ActionButton '등록 삭제'
 
 $log = New-Object System.Windows.Forms.TextBox
-$log.Dock = 'Bottom'
+$log.Dock = 'Fill'
 $log.Height = 150
 $log.Multiline = $true
 $log.ReadOnly = $true
@@ -221,10 +221,19 @@ $removeButton.Add_Click({
     } catch { Show-Error $_.Exception }
 })
 
-$form.Controls.Add($grid)
-$form.Controls.Add($log)
-$form.Controls.Add($buttonPanel)
-$form.Controls.Add($top)
+$layout = New-Object System.Windows.Forms.TableLayoutPanel
+$layout.Dock = 'Fill'
+$layout.ColumnCount = 1
+$layout.RowCount = 4
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',128)))
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent',100)))
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',52)))
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',150)))
+$layout.Controls.Add($top,0,0)
+$layout.Controls.Add($grid,0,1)
+$layout.Controls.Add($buttonPanel,0,2)
+$layout.Controls.Add($log,0,3)
+$form.Controls.Add($layout)
 
 $form.Add_Shown({
     try {
