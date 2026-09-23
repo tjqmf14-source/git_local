@@ -32,7 +32,9 @@ jobs:
 
       - name: Core end-to-end QA (Windows PowerShell 5.1)
         shell: powershell
-        run: .\tests\Run-Tests.ps1
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Core QA child process failed with exit code $LASTEXITCODE" }
 
       - name: UI construction smoke test
         shell: powershell

@@ -232,6 +232,8 @@ function Get-GitLocalProjectStatus {
     $branch=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--show-current') -AllowFailure).Output.Trim()
     $dirty=-not [string]::IsNullOrWhiteSpace((Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('status','--porcelain')).Output)
     $remote=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('remote','get-url','origin') -AllowFailure).Output.Trim()
+    $detached=[string]::IsNullOrWhiteSpace($branch)
+    $hasOrigin=-not [string]::IsNullOrWhiteSpace($remote)
     $ahead=0; $behind=0
     $up=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--abbrev-ref','--symbolic-full-name','@{u}') -AllowFailure
     if ($up.ExitCode -eq 0) {
@@ -243,8 +245,10 @@ function Get-GitLocalProjectStatus {
     }
 
     $state='clean'; $message='동기화됨'
-    if ($dirty) { $state='modified'; $message='로컬 변경사항 있음' }
-    if ($ahead -gt 0 -and $behind -eq 0) { $state='ahead'; $message="푸시 필요 +$ahead" }
+    if ($detached) { $state='detached'; $message='detached HEAD - 브랜치 선택 필요' }
+    elseif (-not $hasOrigin) { $state='no-remote'; $message='origin 원격 저장소 없음' }
+    elseif ($dirty) { $state='modified'; $message='로컬 변경사항 있음' }
+    elseif ($ahead -gt 0 -and $behind -eq 0) { $state='ahead'; $message="푸시 필요 +$ahead" }
     elseif ($behind -gt 0 -and $ahead -eq 0) { $state='behind'; $message="가져오기 필요 -$behind" }
     elseif ($behind -gt 0 -and $ahead -gt 0) { $state='diverged'; $message="분기됨 +$ahead / -$behind" }
     if ($dirty -and $state -ne 'modified') { $message += ' / 로컬 변경 있음' }
@@ -257,10 +261,12 @@ function Update-GitLocalProjectFromRemote {
     $status=Get-GitLocalProjectStatus $Project
     if ($status.State -in @('missing','not-git')) { throw "프로젝트 폴더 상태가 올바르지 않습니다: $($status.Message)" }
     if ($status.Dirty) { throw '로컬 변경사항이 있어 가져오기를 중단했습니다. 먼저 커밋하거나 변경사항을 정리하세요.' }
+    if ([string]::IsNullOrWhiteSpace([string]$status.Branch)) { throw '현재 Git 저장소가 detached HEAD 상태입니다. 작업 브랜치를 체크아웃한 뒤 다시 시도하세요.' }
+    if ([string]::IsNullOrWhiteSpace([string]$status.Remote)) { throw 'origin 원격 저장소가 설정되어 있지 않습니다. GitHub 저장소를 다시 연결하세요.' }
 
-    Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('fetch','origin','--prune') | Out-Null
-    $branch=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--show-current') -AllowFailure).Output.Trim()
-    if ([string]::IsNullOrWhiteSpace($branch)) { $branch='main' }
+    $branch=[string]$status.Branch
+    try { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('fetch','origin','--prune') | Out-Null }
+    catch { throw ("GitHub 가져오기 준비에 실패했습니다. 인터넷 연결, 저장소 주소, 권한 또는 인증 상태를 확인하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
 
     $hasHead=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--verify','HEAD') -AllowFailure
     $remoteRef="refs/remotes/origin/$branch"
@@ -271,9 +277,14 @@ function Update-GitLocalProjectFromRemote {
     }
     if ($hasRemote.ExitCode -ne 0) { return [pscustomobject]@{Result='no-remote-branch';Branch=$branch} }
 
-    $up=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--abbrev-ref','--symbolic-full-name','@{u}') -AllowFailure
-    if ($up.ExitCode -ne 0) { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--set-upstream-to',"origin/$branch",$branch) | Out-Null }
-    Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('pull','--ff-only') | Out-Null
+    try {
+        $up=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--abbrev-ref','--symbolic-full-name','@{u}') -AllowFailure
+        if ($up.ExitCode -ne 0) { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--set-upstream-to',"origin/$branch",$branch) | Out-Null }
+        Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('pull','--ff-only') | Out-Null
+    }
+    catch {
+        throw ("GitHub 가져오기에 실패했습니다. 로컬과 원격 브랜치가 분기되었거나 fast-forward가 불가능합니다. 수동으로 충돌을 해결한 뒤 다시 시도하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message)
+    }
     [pscustomobject]@{Result='pulled';Branch=$branch}
 }
 
@@ -284,6 +295,9 @@ function Publish-GitLocalProject {
     $path=[string]$Project.localPath
     $status=Get-GitLocalProjectStatus $Project
     if ($status.State -in @('missing','not-git')) { throw "프로젝트 폴더 상태가 올바르지 않습니다: $($status.Message)" }
+    if ([string]::IsNullOrWhiteSpace([string]$status.Branch)) { throw '현재 Git 저장소가 detached HEAD 상태입니다. 작업 브랜치를 체크아웃한 뒤 다시 시도하세요.' }
+    if ([string]::IsNullOrWhiteSpace([string]$status.Remote)) { throw 'origin 원격 저장소가 설정되어 있지 않습니다. GitHub 저장소를 다시 연결하세요.' }
+
     $changes=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('status','--porcelain')).Output
     if ([string]::IsNullOrWhiteSpace($changes)) { return [pscustomobject]@{Result='no-changes';Branch=$status.Branch} }
 
@@ -291,8 +305,7 @@ function Publish-GitLocalProject {
     try { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('commit','-m',$CommitMessage.Trim()) | Out-Null }
     catch { throw ("커밋에 실패했습니다. Git user.name / user.email 설정도 확인하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
 
-    $branch=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--show-current')).Output.Trim()
-    if ([string]::IsNullOrWhiteSpace($branch)) { $branch='main'; Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','-M',$branch)|Out-Null }
+    $branch=[string]$status.Branch
     try { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('push','-u','origin',$branch) | Out-Null }
     catch { throw ("GitHub 푸시에 실패했습니다. 원격 변경사항, 권한 또는 인증 상태를 확인하세요. 강제 푸시는 자동으로 수행하지 않습니다.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
     [pscustomobject]@{Result='pushed';Branch=$branch}
