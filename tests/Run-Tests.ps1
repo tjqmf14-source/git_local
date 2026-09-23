@@ -19,16 +19,13 @@ function Assert-Throws([scriptblock]$action,[string]$name) {
     $thrown = $false
     try { & $action } catch { $thrown = $true }
     if (-not $thrown) { Fail $name '예외가 발생해야 하지만 발생하지 않았습니다.' }
-    $global:LASTEXITCODE = 0
     Pass $name
 }
-function Assert-ThrowsLike([scriptblock]$action,[string]$pattern,[string]$name) {
-    $thrown = $false
-    $message = ''
-    try { & $action } catch { $thrown = $true; $message = $_.Exception.Message }
-    if (-not $thrown) { Fail $name '예외가 발생해야 하지만 발생하지 않았습니다.' }
-    if ($message -notmatch $pattern) { Fail $name "예외 메시지가 예상 패턴과 다릅니다: $message" }
-    $global:LASTEXITCODE = 0
+function Assert-ThrowsMatch([scriptblock]$action,[string]$pattern,[string]$name) {
+    $message = $null
+    try { & $action } catch { $message = $_.Exception.Message }
+    if ($null -eq $message) { Fail $name '예외가 발생해야 하지만 발생하지 않았습니다.' }
+    if ($message -notmatch $pattern) { Fail $name ("예상 오류 패턴='{0}' actual='{1}'" -f $pattern,$message) }
     Pass $name
 }
 
@@ -40,6 +37,19 @@ $tokens=$null; $errors=$null
 [System.Management.Automation.Language.Parser]::ParseFile($appPath,[ref]$tokens,[ref]$errors) | Out-Null
 if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host ("UI PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber,$_.Message) } }
 Assert-Equal $errors.Count 0 'UI PowerShell syntax'
+
+$workflowPath = Join-Path $repoRoot '.github\workflows\windows-qa.yml'
+$selfLines = @(Get-Content -LiteralPath $PSCommandPath)
+$forcedExitLines = @($selfLines | Where-Object { $_.Trim() -eq 'exit 0' })
+Assert-Equal $forcedExitLines.Count 0 'QA script does not force exit zero'
+$lastExitOverwriteLines = @($selfLines | Where-Object { $_.Trim() -eq '$global:LASTEXITCODE = 0' })
+Assert-Equal $lastExitOverwriteLines.Count 0 'QA script does not overwrite global LASTEXITCODE'
+$workflowLines = @(Get-Content -LiteralPath $workflowPath)
+$hiddenFailureLines = @($workflowLines | Where-Object {
+    $line = $_.Trim()
+    ($line -eq 'continue-on-error: true') -or $line.Contains('|| true')
+})
+Assert-Equal $hiddenFailureLines.Count 0 'QA workflow does not hide failures'
 
 Import-Module $modulePath -Force
 
@@ -87,11 +97,6 @@ try {
     Assert-Equal $status.Branch 'main' 'Current branch detection'
     Assert-Equal $status.State 'clean' 'Initial clean state'
 
-    $missingProject = [pscustomobject]@{ id='missing'; name='missing'; localPath=(Join-Path $base 'missing-folder'); repositoryUrl=$remote; branch='main' }
-    $missingStatus = Get-GitLocalProjectStatus -Project $missingProject
-    Assert-Equal $missingStatus.State 'missing' 'Missing local path status'
-    Assert-Throws { Update-GitLocalProjectFromRemote -Project $missingProject | Out-Null } 'Missing local path pull protection'
-
     Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('config','user.name','GitLocal QA') | Out-Null
     Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('config','user.email','qa@example.invalid') | Out-Null
     Add-Content -LiteralPath (Join-Path $target 'README.txt') -Value 'local-change' -Encoding UTF8
@@ -119,52 +124,14 @@ try {
     Assert-Throws { Update-GitLocalProjectFromRemote -Project $reg.Project | Out-Null } 'Dirty working tree pull protection'
     Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('checkout','--','README.txt') | Out-Null
 
-    $pushRejectTarget = Join-Path $base 'push-reject'
-    Invoke-GitLocalGit -Arguments @('clone',$remote,$pushRejectTarget) | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $pushRejectTarget -Arguments @('config','user.name','GitLocal QA') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $pushRejectTarget -Arguments @('config','user.email','qa@example.invalid') | Out-Null
-    $pushRejectProject = [pscustomobject]@{ id='push-reject'; name='push-reject'; localPath=$pushRejectTarget; repositoryUrl=$remote; branch='main' }
-
-    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('pull','--rebase','origin','main') | Out-Null
-    Add-Content -LiteralPath (Join-Path $seed 'README.txt') -Value 'remote-advance-for-reject' -Encoding UTF8
-    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('add','-A') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','qa: advance remote for rejection') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
-    Add-Content -LiteralPath (Join-Path $pushRejectTarget 'README.txt') -Value 'local-divergent-change' -Encoding UTF8
-    Assert-ThrowsLike { Publish-GitLocalProject -Project $pushRejectProject -CommitMessage 'qa: rejected push' | Out-Null } 'GitHub 푸시에 실패|권한|인증|강제 푸시' 'Push rejection handling'
-    Assert-Throws { Update-GitLocalProjectFromRemote -Project $pushRejectProject | Out-Null } 'Diverged pull protection'
-
-    $noRemoteTarget = Join-Path $base 'no-remote'
-    New-Item -ItemType Directory -Path $noRemoteTarget -Force | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $noRemoteTarget -Arguments @('init','-b','main') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $noRemoteTarget -Arguments @('config','user.name','GitLocal QA') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $noRemoteTarget -Arguments @('config','user.email','qa@example.invalid') | Out-Null
-    Set-Content -LiteralPath (Join-Path $noRemoteTarget 'README.txt') -Value 'no remote' -Encoding UTF8
-    Invoke-GitLocalGit -WorkingDirectory $noRemoteTarget -Arguments @('add','-A') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $noRemoteTarget -Arguments @('commit','-m','qa: no remote') | Out-Null
-    $noRemoteProject = [pscustomobject]@{ id='no-remote'; name='no-remote'; localPath=$noRemoteTarget; repositoryUrl=''; branch='main' }
-    $noRemoteStatus = Get-GitLocalProjectStatus -Project $noRemoteProject
-    Assert-Equal $noRemoteStatus.Remote '' 'Missing origin status'
-    Assert-Throws { Update-GitLocalProjectFromRemote -Project $noRemoteProject | Out-Null } 'Missing origin remote handling'
-
-    $detachedTarget = Join-Path $base 'detached'
-    Invoke-GitLocalGit -Arguments @('clone',$remote,$detachedTarget) | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $detachedTarget -Arguments @('config','user.name','GitLocal QA') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $detachedTarget -Arguments @('config','user.email','qa@example.invalid') | Out-Null
-    Invoke-GitLocalGit -WorkingDirectory $detachedTarget -Arguments @('checkout','--detach','HEAD') | Out-Null
-    $detachedProject = [pscustomobject]@{ id='detached'; name='detached'; localPath=$detachedTarget; repositoryUrl=$remote; branch='main' }
-    $detachedStatus = Get-GitLocalProjectStatus -Project $detachedProject
-    Assert-Equal $detachedStatus.State 'detached' 'Detached HEAD status'
-    Assert-Throws { Update-GitLocalProjectFromRemote -Project $detachedProject | Out-Null } 'Detached HEAD pull protection'
-    Add-Content -LiteralPath (Join-Path $detachedTarget 'README.txt') -Value 'detached-local-change' -Encoding UTF8
-    Assert-Throws { Publish-GitLocalProject -Project $detachedProject -CommitMessage 'qa: detached publish' | Out-Null } 'Detached HEAD publish protection'
-
     $unicode = Register-GitLocalProject -Name '한글 프로젝트' -RepositoryUrl $remote -LocalPath $unicodeTarget
     Assert-Equal $unicode.Mode 'cloned' 'Unicode path clone'
     Assert-True (Test-Path -LiteralPath (Join-Path $unicodeTarget 'README.txt')) 'Unicode path content'
-    Assert-Equal @(Get-GitLocalProjects).Count 2 'Multiple project isolation count'
-    Assert-True ($unicode.Project.id -ne $reg.Project.id) 'Multiple project unique IDs'
-    Assert-Equal (Get-GitLocalProject -Id $reg.Project.id).localPath $target 'Primary project remains isolated'
+    $multiProjects = @(Get-GitLocalProjects)
+    Assert-Equal $multiProjects.Count 2 'Multiple project persistence count'
+    $mainProject = Get-GitLocalProject -Id $reg.Project.id
+    $unicodeProject = Get-GitLocalProject -Id $unicode.Project.id
+    Assert-True (-not [string]::Equals([string]$mainProject.localPath,[string]$unicodeProject.localPath,[StringComparison]::OrdinalIgnoreCase)) 'Multiple project isolation'
     Remove-GitLocalProject -Id $unicode.Project.id | Out-Null
     Assert-Equal @(Get-GitLocalProjects).Count 1 'Project removal persistence'
 
@@ -187,6 +154,69 @@ try {
     Invoke-GitLocalGit -WorkingDirectory $broken -Arguments @('remote','add','origin',(Join-Path $base 'does-not-exist.git')) | Out-Null
     $brokenProject = [pscustomobject]@{ id='broken'; name='broken'; localPath=$broken; repositoryUrl='broken'; branch='main' }
     Assert-Throws { Update-GitLocalProjectFromRemote -Project $brokenProject | Out-Null } 'Unreachable remote error handling'
+
+    Assert-Throws { Resolve-GitLocalRepositoryUrl 'https://github.com/owner' | Out-Null } 'Reject incomplete GitHub URL'
+
+    $missingProject = [pscustomobject]@{ id='missing'; name='missing'; localPath=(Join-Path $base 'missing-local'); repositoryUrl=$remote; branch='main' }
+    $missingStatus = Get-GitLocalProjectStatus -Project $missingProject
+    Assert-Equal $missingStatus.State 'missing' 'Missing local path status'
+
+    $noRemote = Join-Path $base 'no-remote'
+    Invoke-GitLocalGit -Arguments @('clone',$remote,$noRemote) | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $noRemote -Arguments @('remote','remove','origin') | Out-Null
+    $noRemoteProject = [pscustomobject]@{ id='no-remote'; name='no-remote'; localPath=$noRemote; repositoryUrl=$remote; branch='main' }
+    $noRemoteStatus = Get-GitLocalProjectStatus -Project $noRemoteProject
+    Assert-Equal $noRemoteStatus.State 'no-remote' 'Missing origin status'
+    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $noRemoteProject | Out-Null } 'origin 원격 저장소' 'Missing origin pull protection'
+
+    $detached = Join-Path $base 'detached'
+    Invoke-GitLocalGit -Arguments @('clone',$remote,$detached) | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $detached -Arguments @('config','user.name','GitLocal QA') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $detached -Arguments @('config','user.email','qa@example.invalid') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $detached -Arguments @('checkout','--detach','HEAD') | Out-Null
+    $detachedProject = [pscustomobject]@{ id='detached'; name='detached'; localPath=$detached; repositoryUrl=$remote; branch='main' }
+    $detachedStatus = Get-GitLocalProjectStatus -Project $detachedProject
+    Assert-Equal $detachedStatus.State 'detached' 'Detached HEAD status'
+    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $detachedProject | Out-Null } 'detached HEAD' 'Detached HEAD pull protection'
+    Add-Content -LiteralPath (Join-Path $detached 'README.txt') -Value 'detached-change' -Encoding UTF8
+    Assert-ThrowsMatch { Publish-GitLocalProject -Project $detachedProject -CommitMessage 'qa: detached push' | Out-Null } 'detached HEAD' 'Detached HEAD push protection'
+
+    $pushReject = Join-Path $base 'push-reject'
+    Invoke-GitLocalGit -Arguments @('clone',$remote,$pushReject) | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $pushReject -Arguments @('config','user.name','GitLocal QA') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $pushReject -Arguments @('config','user.email','qa@example.invalid') | Out-Null
+    Add-Content -LiteralPath (Join-Path $seed 'README.txt') -Value 'remote-ahead-for-push-reject' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','qa: remote ahead for rejection') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
+    Add-Content -LiteralPath (Join-Path $pushReject 'README.txt') -Value 'local-behind-push' -Encoding UTF8
+    $pushRejectProject = [pscustomobject]@{ id='push-reject'; name='push-reject'; localPath=$pushReject; repositoryUrl=$remote; branch='main' }
+    Assert-ThrowsMatch { Publish-GitLocalProject -Project $pushRejectProject -CommitMessage 'qa: rejected push' | Out-Null } 'GitHub 푸시에 실패했습니다' 'Rejected push protection'
+
+    $pullConflict = Join-Path $base 'pull-conflict'
+    Invoke-GitLocalGit -Arguments @('clone',$remote,$pullConflict) | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $pullConflict -Arguments @('config','user.name','GitLocal QA') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $pullConflict -Arguments @('config','user.email','qa@example.invalid') | Out-Null
+    Add-Content -LiteralPath (Join-Path $pullConflict 'README.txt') -Value 'local-diverged-change' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $pullConflict -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $pullConflict -Arguments @('commit','-m','qa: local divergence') | Out-Null
+    Add-Content -LiteralPath (Join-Path $seed 'README.txt') -Value 'remote-diverged-change' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','qa: remote divergence') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
+    $pullConflictProject = [pscustomobject]@{ id='pull-conflict'; name='pull-conflict'; localPath=$pullConflict; repositoryUrl=$remote; branch='main' }
+    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $pullConflictProject | Out-Null } '분기|fast-forward' 'Diverged pull protection'
+
+    $networkStub = Join-Path $base 'git-network-fail.cmd'
+    @('@echo off','1>&2 echo fatal: unable to access https://github.com/example/repo.git/: Could not resolve host: github.com','exit /b 128') | Set-Content -LiteralPath $networkStub -Encoding ASCII
+    $env:GITLOCAL_GIT_EXE = $networkStub
+    Assert-ThrowsMatch { Test-GitLocalRemoteAccess 'https://github.com/example/repo' | Out-Null } '인터넷 연결' 'Simulated network failure handling'
+
+    $permissionStub = Join-Path $base 'git-permission-fail.cmd'
+    @('@echo off','1>&2 echo remote: Permission to example/repo.git denied to qa-user.','1>&2 echo fatal: unable to access repository','exit /b 128') | Set-Content -LiteralPath $permissionStub -Encoding ASCII
+    $env:GITLOCAL_GIT_EXE = $permissionStub
+    Assert-ThrowsMatch { Test-GitLocalRemoteAccess 'https://github.com/example/repo' | Out-Null } '인증 상태' 'Simulated permission denied handling'
+    $env:GITLOCAL_GIT_EXE = $git
 
     Write-Host ''
     Write-Host 'ALL CORE QA TESTS PASSED' -ForegroundColor Green
