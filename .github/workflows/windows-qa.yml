@@ -36,9 +36,9 @@ jobs:
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
           if ($LASTEXITCODE -ne 0) { throw "Core QA child process failed with exit code $LASTEXITCODE" }
 
-      - name: UI construction smoke test
+      - name: UI interaction smoke test
         shell: powershell
-        run: .\src\GitLocal.App.ps1 -SelfTest
+        run: .\src\GitLocal.App.ps1 -SelfTest -ScreenshotPath "$env:RUNNER_TEMP\GitLocal-ui-smoke.png"
 
       - name: Build portable EXE package
         shell: powershell
@@ -77,6 +77,14 @@ jobs:
           }
 
           Write-Host "PACKAGE_SHA256=$actual"
+
+      - name: Upload UI smoke screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: GitLocal-ui-smoke
+          path: ${{ runner.temp }}/GitLocal-ui-smoke.png
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload QA package
         uses: actions/upload-artifact@v4

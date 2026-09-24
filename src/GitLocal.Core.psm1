@@ -111,7 +111,7 @@ function Read-GitLocalConfig {
 }
 
 function Write-GitLocalConfig {
-    param([Parameter(Mandatory=$true)][object[]]$Projects)
+    param([Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$Projects)
     $root = Get-GitLocalConfigRoot
     if (-not (Test-Path -LiteralPath $root -PathType Container)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
     $path = Get-GitLocalConfigFile

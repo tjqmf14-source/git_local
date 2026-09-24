@@ -155,6 +155,9 @@ try {
     $brokenProject = [pscustomobject]@{ id='broken'; name='broken'; localPath=$broken; repositoryUrl='broken'; branch='main' }
     Assert-Throws { Update-GitLocalProjectFromRemote -Project $brokenProject | Out-Null } 'Unreachable remote error handling'
 
+    Remove-GitLocalProject -Id $reg.Project.id | Out-Null
+    Assert-Equal @(Get-GitLocalProjects).Count 0 'Remove final project persistence'
+
     Assert-Throws { Resolve-GitLocalRepositoryUrl 'https://github.com/owner' | Out-Null } 'Reject incomplete GitHub URL'
 
     $missingProject = [pscustomobject]@{ id='missing'; name='missing'; localPath=(Join-Path $base 'missing-local'); repositoryUrl=$remote; branch='main' }
