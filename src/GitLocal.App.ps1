@@ -1,4 +1,4 @@
-﻿param([switch]$SelfTest)
+﻿param([switch]$SelfTest,[string]$ScreenshotPath)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -22,7 +22,7 @@ if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
 }
 
 $top = New-Object System.Windows.Forms.TableLayoutPanel
-$top.Dock = 'Top'
+$top.Dock = 'Fill'
 $top.Height = 128
 $top.ColumnCount = 4
 $top.RowCount = 3
@@ -91,7 +91,7 @@ $grid.Columns['State'].FillWeight = 20
 $grid.Columns['Path'].FillWeight = 50
 
 $buttonPanel = New-Object System.Windows.Forms.FlowLayoutPanel
-$buttonPanel.Dock = 'Bottom'
+$buttonPanel.Dock = 'Fill'
 $buttonPanel.Height = 52
 $buttonPanel.FlowDirection = 'LeftToRight'
 $buttonPanel.Padding = New-Object System.Windows.Forms.Padding(10,8,10,8)
@@ -112,7 +112,7 @@ $openButton = New-ActionButton '폴더 열기'
 $removeButton = New-ActionButton '등록 삭제'
 
 $log = New-Object System.Windows.Forms.TextBox
-$log.Dock = 'Bottom'
+$log.Dock = 'Fill'
 $log.Height = 150
 $log.Multiline = $true
 $log.ReadOnly = $true
@@ -126,6 +126,7 @@ function Write-Log([string]$message) {
 
 function Show-Error([Exception]$exception) {
     Write-Log ('오류: ' + $exception.Message)
+    if ($SelfTest) { throw $exception }
     [System.Windows.Forms.MessageBox]::Show($form,$exception.Message,'Git Local - 오류','OK','Error') | Out-Null
 }
 
@@ -188,7 +189,8 @@ $pushButton.Add_Click({
     try {
         $p = Get-SelectedProject
         $defaultMessage = 'sync: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-        $message = [Microsoft.VisualBasic.Interaction]::InputBox('커밋 메시지를 입력하세요.','Git Local - 커밋',$defaultMessage)
+        if ($SelfTest) { $message = 'qa: ui interaction smoke push' }
+        else { $message = [Microsoft.VisualBasic.Interaction]::InputBox('커밋 메시지를 입력하세요.','Git Local - 커밋',$defaultMessage) }
         if ([string]::IsNullOrWhiteSpace($message)) { return }
         Write-Log ("커밋/푸시 시작: " + $p.name)
         $r = Publish-GitLocalProject -Project $p -CommitMessage $message
@@ -209,7 +211,8 @@ $openButton.Add_Click({
 $removeButton.Add_Click({
     try {
         $p = Get-SelectedProject
-        $answer = [System.Windows.Forms.MessageBox]::Show($form,"'$($p.name)' 등록만 삭제합니다. 로컬 파일은 삭제하지 않습니다.",'Git Local','YesNo','Question')
+        if ($SelfTest) { $answer = 'Yes' }
+        else { $answer = [System.Windows.Forms.MessageBox]::Show($form,"'$($p.name)' 등록만 삭제합니다. 로컬 파일은 삭제하지 않습니다.",'Git Local','YesNo','Question') }
         if ($answer -eq 'Yes') {
             Remove-GitLocalProject -Id $p.id | Out-Null
             Write-Log ("등록 삭제: " + $p.name)
@@ -218,10 +221,19 @@ $removeButton.Add_Click({
     } catch { Show-Error $_.Exception }
 })
 
-$form.Controls.Add($grid)
-$form.Controls.Add($log)
-$form.Controls.Add($buttonPanel)
-$form.Controls.Add($top)
+$layout = New-Object System.Windows.Forms.TableLayoutPanel
+$layout.Dock = 'Fill'
+$layout.ColumnCount = 1
+$layout.RowCount = 4
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',128)))
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent',100)))
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',52)))
+$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Absolute',150)))
+$layout.Controls.Add($top,0,0)
+$layout.Controls.Add($grid,0,1)
+$layout.Controls.Add($buttonPanel,0,2)
+$layout.Controls.Add($log,0,3)
+$form.Controls.Add($layout)
 
 $form.Add_Shown({
     try {
@@ -231,8 +243,123 @@ $form.Add_Shown({
 })
 
 if ($SelfTest) {
-    Resolve-GitLocalGitExecutable | Out-Null
-    Write-Output 'GITLOCAL_UI_SELFTEST_OK'
+    $oldConfigHome = $env:GITLOCAL_CONFIG_HOME
+    $oldAllowLocal = $env:GITLOCAL_ALLOW_LOCAL_REMOTE
+    $base = Join-Path ([System.IO.Path]::GetTempPath()) ('GitLocal-UI-QA-' + [Guid]::NewGuid().ToString('N'))
+    $configRoot = Join-Path $base 'config'
+    $remote = Join-Path $base 'remote.git'
+    $seed = Join-Path $base 'seed'
+    $target = Join-Path $base 'work'
+
+    try {
+        New-Item -ItemType Directory -Path $base -Force | Out-Null
+        $env:GITLOCAL_CONFIG_HOME = $configRoot
+        $env:GITLOCAL_ALLOW_LOCAL_REMOTE = '1'
+        Resolve-GitLocalGitExecutable | Out-Null
+
+        Invoke-GitLocalGit -Arguments @('init','--bare',$remote) | Out-Null
+        New-Item -ItemType Directory -Path $seed -Force | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('init','-b','main') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('config','user.name','GitLocal UI QA') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('config','user.email','ui-qa@example.invalid') | Out-Null
+        Set-Content -LiteralPath (Join-Path $seed 'README.txt') -Value 'ui-seed' -Encoding UTF8
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('add','-A') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','ui qa seed') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('remote','add','origin',$remote) | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','-u','origin','main') | Out-Null
+        Invoke-GitLocalGit -Arguments @("--git-dir=$remote",'symbolic-ref','HEAD','refs/heads/main') | Out-Null
+
+        $form.Show()
+        [System.Windows.Forms.Application]::DoEvents()
+        if (-not $form.IsHandleCreated -or -not $form.Visible) { throw 'UI 창 핸들이 생성되거나 표시되지 않았습니다.' }
+
+        $buttons = @($registerButton,$refreshButton,$pullButton,$pushButton,$openButton,$removeButton)
+        if ($buttons.Count -ne 6) { throw '필수 UI 버튼 개수가 올바르지 않습니다.' }
+        foreach ($button in $buttons) {
+            if (-not $button.IsHandleCreated) { throw "UI 버튼 핸들이 생성되지 않았습니다: $($button.Text)" }
+        }
+
+        $refreshButton.PerformClick()
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $nameBox.Text = 'UI QA Project'
+        $repoBox.Text = $remote
+        $pathBox.Text = $target
+        $registerButton.PerformClick()
+        [System.Windows.Forms.Application]::DoEvents()
+        if ($grid.Rows.Count -ne 1) { throw "등록 버튼 실행 후 프로젝트 행 수가 올바르지 않습니다: $($grid.Rows.Count)" }
+        if (@(Get-GitLocalProjects).Count -ne 1) { throw '등록 버튼 실행 결과가 설정에 저장되지 않았습니다.' }
+        Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('config','user.name','GitLocal UI QA') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('config','user.email','ui-qa@example.invalid') | Out-Null
+
+        $grid.ClearSelection()
+        $grid.Rows[0].Selected = $true
+        $grid.CurrentCell = $grid.Rows[0].Cells['Name']
+
+        Add-Content -LiteralPath (Join-Path $seed 'README.txt') -Value 'ui-remote-change' -Encoding UTF8
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('add','-A') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','ui qa remote change') | Out-Null
+        Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
+
+        $pullButton.PerformClick()
+        [System.Windows.Forms.Application]::DoEvents()
+        $pulled = Get-Content -LiteralPath (Join-Path $target 'README.txt') -Raw
+        if ($pulled -notmatch 'ui-remote-change') { throw 'GitHub → 로컬 버튼이 원격 변경을 반영하지 못했습니다.' }
+
+        Add-Content -LiteralPath (Join-Path $target 'README.txt') -Value 'ui-local-push' -Encoding UTF8
+        $pushButton.PerformClick()
+        [System.Windows.Forms.Application]::DoEvents()
+        $remoteText = (Invoke-GitLocalGit -Arguments @("--git-dir=$remote",'show','main:README.txt')).Output
+        if ($remoteText -notmatch 'ui-local-push') { throw '커밋 + 푸시 버튼이 로컬 변경을 원격에 반영하지 못했습니다.' }
+
+        $refreshButton.PerformClick()
+        [System.Windows.Forms.Application]::DoEvents()
+        if ($log.Text -notmatch '등록 완료' -or $log.Text -notmatch '가져오기 완료' -or $log.Text -notmatch '푸시 완료') {
+            throw 'UI 작업 로그에 필수 성공 이벤트가 기록되지 않았습니다.'
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($ScreenshotPath)) {
+            $shotParent = Split-Path -Parent $ScreenshotPath
+            if (-not [string]::IsNullOrWhiteSpace($shotParent) -and -not (Test-Path -LiteralPath $shotParent -PathType Container)) {
+                New-Item -ItemType Directory -Path $shotParent -Force | Out-Null
+            }
+            $form.Refresh()
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 250
+            $width = [Math]::Max(1,$form.ClientSize.Width)
+            $height = [Math]::Max(1,$form.ClientSize.Height)
+            $bitmap = New-Object System.Drawing.Bitmap $width,$height
+            try {
+                $bounds = New-Object System.Drawing.Rectangle -ArgumentList 0,0,$width,$height
+                $form.DrawToBitmap($bitmap,$bounds)
+                $bitmap.Save($ScreenshotPath,[System.Drawing.Imaging.ImageFormat]::Png)
+            }
+            finally {
+                $bitmap.Dispose()
+            }
+            if (-not (Test-Path -LiteralPath $ScreenshotPath -PathType Leaf)) { throw 'UI 스모크 스크린샷이 생성되지 않았습니다.' }
+            Write-Output "GITLOCAL_UI_SCREENSHOT=$ScreenshotPath"
+        }
+
+        $grid.ClearSelection()
+        $grid.Rows[0].Selected = $true
+        $grid.CurrentCell = $grid.Rows[0].Cells['Name']
+        $removeButton.PerformClick()
+        [System.Windows.Forms.Application]::DoEvents()
+        if (@(Get-GitLocalProjects).Count -ne 0) { throw '등록 삭제 버튼이 프로젝트 설정을 제거하지 못했습니다.' }
+
+        Write-Output 'GITLOCAL_UI_INTERACTION_SMOKE_OK'
+        Write-Output 'GITLOCAL_UI_SELFTEST_OK'
+    }
+    finally {
+        if (-not $form.IsDisposed) {
+            try { $form.Close() } catch {}
+            try { $form.Dispose() } catch {}
+        }
+        $env:GITLOCAL_CONFIG_HOME = $oldConfigHome
+        $env:GITLOCAL_ALLOW_LOCAL_REMOTE = $oldAllowLocal
+        if (Test-Path -LiteralPath $base) { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
+    }
     return
 }
 
