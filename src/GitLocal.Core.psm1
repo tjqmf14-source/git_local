@@ -261,32 +261,75 @@ function Update-GitLocalProjectFromRemote {
     $path=[string]$Project.localPath
     $status=Get-GitLocalProjectStatus $Project
     if ($status.State -in @('missing','not-git')) { throw "프로젝트 폴더 상태가 올바르지 않습니다: $($status.Message)" }
-    if ($status.Dirty) { throw '로컬 변경사항이 있어 가져오기를 중단했습니다. 먼저 커밋하거나 변경사항을 정리하세요.' }
+    if ($status.Dirty) { throw '로컬에 아직 커밋하지 않은 변경사항이 있습니다. 파일 보호를 위해 GitHub → 로컬을 중단했습니다. 먼저 로컬 → GitHub로 커밋하거나 변경사항을 직접 정리하세요.' }
     if ([string]::IsNullOrWhiteSpace([string]$status.Branch)) { throw '현재 Git 저장소가 detached HEAD 상태입니다. 작업 브랜치를 체크아웃한 뒤 다시 시도하세요.' }
     if ([string]::IsNullOrWhiteSpace([string]$status.Remote)) { throw 'origin 원격 저장소가 설정되어 있지 않습니다. GitHub 저장소를 다시 연결하세요.' }
 
     $branch=[string]$status.Branch
     try { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('fetch','origin','--prune') | Out-Null }
-    catch { throw ("GitHub 가져오기 준비에 실패했습니다. 인터넷 연결, 저장소 주소, 권한 또는 인증 상태를 확인하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
+    catch { throw ("GitHub 최신 상태 확인에 실패했습니다. 인터넷 연결, 저장소 주소, 권한 또는 인증 상태를 확인하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
 
     $hasHead=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--verify','HEAD') -AllowFailure
     $remoteRef="refs/remotes/origin/$branch"
     $hasRemote=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('show-ref','--verify','--quiet',$remoteRef) -AllowFailure
     if ($hasHead.ExitCode -ne 0 -and $hasRemote.ExitCode -eq 0) {
         Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('checkout','-B',$branch,"origin/$branch") | Out-Null
-        return [pscustomobject]@{Result='checked-out';Branch=$branch}
+        return [pscustomobject]@{Result='checked-out';Branch=$branch;Ahead=0;Behind=0}
     }
-    if ($hasRemote.ExitCode -ne 0) { return [pscustomobject]@{Result='no-remote-branch';Branch=$branch} }
+    if ($hasRemote.ExitCode -ne 0) {
+        return [pscustomobject]@{Result='no-remote-branch';Branch=$branch;Ahead=0;Behind=0}
+    }
 
-    try {
-        $up=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--abbrev-ref','--symbolic-full-name','@{u}') -AllowFailure
-        if ($up.ExitCode -ne 0) { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--set-upstream-to',"origin/$branch",$branch) | Out-Null }
-        Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('pull','--ff-only') | Out-Null
+    $up=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','--abbrev-ref','--symbolic-full-name','@{u}') -AllowFailure
+    if ($up.ExitCode -ne 0) {
+        Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('branch','--set-upstream-to',"origin/$branch",$branch) | Out-Null
     }
-    catch {
-        throw ("GitHub 가져오기에 실패했습니다. 로컬과 원격 브랜치가 분기되었거나 fast-forward가 불가능합니다. 수동으로 충돌을 해결한 뒤 다시 시도하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message)
+
+    $count=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-list','--left-right','--count',"HEAD...origin/$branch") -AllowFailure
+    if ($count.ExitCode -ne 0) { throw '로컬과 GitHub의 커밋 차이를 계산하지 못했습니다.' }
+    $parts=@($count.Output.Trim() -split '\s+')
+    if ($parts.Count -lt 2) { throw '로컬과 GitHub의 커밋 차이 결과를 해석하지 못했습니다.' }
+    $ahead=0; $behind=0
+    [int]::TryParse($parts[0],[ref]$ahead) | Out-Null
+    [int]::TryParse($parts[1],[ref]$behind) | Out-Null
+
+    if ($ahead -eq 0 -and $behind -eq 0) {
+        return [pscustomobject]@{Result='up-to-date';Branch=$branch;Ahead=0;Behind=0}
     }
-    [pscustomobject]@{Result='pulled';Branch=$branch}
+
+    if ($ahead -eq 0 -and $behind -gt 0) {
+        $ff=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('merge','--ff-only',"origin/$branch") -AllowFailure
+        if ($ff.ExitCode -ne 0) {
+            throw ("GitHub 변경사항을 fast-forward로 반영하지 못했습니다. 로컬 파일은 변경하지 않았습니다.{0}{1}" -f [Environment]::NewLine,$ff.Output)
+        }
+        return [pscustomobject]@{Result='pulled';Branch=$branch;Ahead=0;Behind=$behind}
+    }
+
+    if ($ahead -gt 0 -and $behind -eq 0) {
+        return [pscustomobject]@{Result='local-ahead';Branch=$branch;Ahead=$ahead;Behind=0}
+    }
+
+    $headBefore=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-parse','HEAD')).Output.Trim()
+    $mergeMessage="Git Local: merge origin/$branch"
+    $merge=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('merge','--no-edit','--no-ff','-m',$mergeMessage,"origin/$branch") -AllowFailure
+    if ($merge.ExitCode -ne 0) {
+        $conflicts=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('diff','--name-only','--diff-filter=U') -AllowFailure).Output.Trim()
+        $abort=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('merge','--abort') -AllowFailure
+        if ($abort.ExitCode -ne 0) {
+            $restore=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('reset','--merge',$headBefore) -AllowFailure
+            if ($restore.ExitCode -ne 0) {
+                throw ("자동 병합에 실패했고 원상 복구도 완료하지 못했습니다. 추가 작업을 중단하고 저장소를 수동 확인하세요.{0}{1}" -f [Environment]::NewLine,$merge.Output)
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($conflicts)) {
+            $conflictList=($conflicts -replace [Environment]::NewLine,', ')
+            throw ("로컬과 GitHub 양쪽에서 같은 부분을 수정해 자동 병합할 수 없습니다. 병합 작업은 취소되어 시작 전 상태로 복구되었습니다. 파일은 삭제되지 않았습니다. 충돌 파일: {0}" -f $conflictList)
+        }
+        throw ("로컬과 GitHub 변경사항 자동 병합에 실패해 시작 전 상태로 복구했습니다. Git user.name / user.email 설정도 확인하세요.{0}{1}" -f [Environment]::NewLine,$merge.Output)
+    }
+
+    [pscustomobject]@{Result='merged';Branch=$branch;Ahead=$ahead;Behind=$behind}
 }
 
 function Publish-GitLocalProject {
@@ -299,17 +342,45 @@ function Publish-GitLocalProject {
     if ([string]::IsNullOrWhiteSpace([string]$status.Branch)) { throw '현재 Git 저장소가 detached HEAD 상태입니다. 작업 브랜치를 체크아웃한 뒤 다시 시도하세요.' }
     if ([string]::IsNullOrWhiteSpace([string]$status.Remote)) { throw 'origin 원격 저장소가 설정되어 있지 않습니다. GitHub 저장소를 다시 연결하세요.' }
 
-    $changes=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('status','--porcelain')).Output
-    if ([string]::IsNullOrWhiteSpace($changes)) { return [pscustomobject]@{Result='no-changes';Branch=$status.Branch} }
-
-    Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('add','-A') | Out-Null
-    try { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('commit','-m',$CommitMessage.Trim()) | Out-Null }
-    catch { throw ("커밋에 실패했습니다. Git user.name / user.email 설정도 확인하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
-
     $branch=[string]$status.Branch
+    $changes=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('status','--porcelain')).Output
+    $createdCommit=$false
+    if (-not [string]::IsNullOrWhiteSpace($changes)) {
+        Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('add','-A') | Out-Null
+        try {
+            Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('commit','-m',$CommitMessage.Trim()) | Out-Null
+            $createdCommit=$true
+        }
+        catch { throw ("로컬 변경사항 기록에 실패했습니다. Git user.name / user.email 설정도 확인하세요. 파일은 삭제되지 않습니다.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
+    }
+
+    $sync=Update-GitLocalProjectFromRemote -Project $Project
+
+    $remoteRef="refs/remotes/origin/$branch"
+    $hasRemote=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('show-ref','--verify','--quiet',$remoteRef) -AllowFailure
+    $ahead=1
+    $behind=0
+    if ($hasRemote.ExitCode -eq 0) {
+        $count=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('rev-list','--left-right','--count',"HEAD...origin/$branch") -AllowFailure
+        if ($count.ExitCode -ne 0) { throw 'GitHub 업로드 전 커밋 상태를 확인하지 못했습니다.' }
+        $parts=@($count.Output.Trim() -split '\s+')
+        if ($parts.Count -lt 2) { throw 'GitHub 업로드 전 커밋 차이 결과를 해석하지 못했습니다.' }
+        $ahead=0; $behind=0
+        [int]::TryParse($parts[0],[ref]$ahead) | Out-Null
+        [int]::TryParse($parts[1],[ref]$behind) | Out-Null
+    }
+
+    if ($behind -gt 0) {
+        throw 'GitHub의 최신 변경사항을 아직 안전하게 통합하지 못했습니다. GitHub → 로컬을 다시 실행한 뒤 재시도하세요.'
+    }
+
+    if ($ahead -eq 0) {
+        return [pscustomobject]@{Result='no-changes';Branch=$branch;CreatedCommit=$createdCommit;SyncResult=$sync.Result}
+    }
+
     try { Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('push','-u','origin',$branch) | Out-Null }
-    catch { throw ("GitHub 푸시에 실패했습니다. 원격 변경사항, 권한 또는 인증 상태를 확인하세요. 강제 푸시는 자동으로 수행하지 않습니다.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
-    [pscustomobject]@{Result='pushed';Branch=$branch}
+    catch { throw ("GitHub 업로드에 실패했습니다. 다른 위치에서 새 커밋이 올라왔거나 권한/인증 문제가 있을 수 있습니다. 강제 푸시는 자동으로 수행하지 않습니다. GitHub → 로컬로 최신 상태를 확인한 뒤 다시 시도하세요.{0}{1}" -f [Environment]::NewLine,$_.Exception.Message) }
+    [pscustomobject]@{Result='pushed';Branch=$branch;CreatedCommit=$createdCommit;SyncResult=$sync.Result}
 }
 
 Export-ModuleMember -Function @(

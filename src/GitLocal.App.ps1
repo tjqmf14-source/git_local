@@ -107,9 +107,13 @@ function New-ActionButton([string]$text,[int]$width=135) {
 
 $refreshButton = New-ActionButton '상태 새로고침'
 $pullButton = New-ActionButton 'GitHub → 로컬'
-$pushButton = New-ActionButton '커밋 + 푸시'
+$pushButton = New-ActionButton '로컬 → GitHub'
 $openButton = New-ActionButton '폴더 열기'
 $removeButton = New-ActionButton '등록 삭제'
+
+$toolTip = New-Object System.Windows.Forms.ToolTip
+$toolTip.SetToolTip($pullButton,'GitHub의 최신 변경사항을 로컬에 안전하게 반영합니다. 충돌 시 원래 상태로 복구합니다.')
+$toolTip.SetToolTip($pushButton,'로컬 변경사항을 커밋하고 GitHub에 업로드합니다. 이미 만든 로컬 커밋도 전송합니다.')
 
 $log = New-Object System.Windows.Forms.TextBox
 $log.Dock = 'Fill'
@@ -180,7 +184,16 @@ $pullButton.Add_Click({
         $p = Get-SelectedProject
         Write-Log ("가져오기 시작: " + $p.name)
         $r = Update-GitLocalProjectFromRemote -Project $p
-        Write-Log ("가져오기 완료: " + $r.Result)
+        $detail = switch ($r.Result) {
+            'up-to-date' { '이미 최신 상태입니다.' }
+            'pulled' { 'GitHub의 새 커밋을 로컬에 반영했습니다.' }
+            'merged' { '양쪽 변경사항을 자동 병합했습니다. 로컬 → GitHub를 눌러 병합 결과를 업로드하세요.' }
+            'local-ahead' { '로컬 커밋이 GitHub보다 앞서 있습니다. 로컬 → GitHub를 눌러 업로드하세요.' }
+            'checked-out' { 'GitHub 브랜치를 로컬에 연결했습니다.' }
+            'no-remote-branch' { 'GitHub에 같은 브랜치가 없습니다. 로컬 → GitHub로 새 브랜치를 올릴 수 있습니다.' }
+            default { [string]$r.Result }
+        }
+        Write-Log ("가져오기 완료: " + $detail)
         Refresh-Grid
     } catch { Show-Error $_.Exception }
 })
@@ -190,12 +203,12 @@ $pushButton.Add_Click({
         $p = Get-SelectedProject
         $defaultMessage = 'sync: ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
         if ($SelfTest) { $message = 'qa: ui interaction smoke push' }
-        else { $message = [Microsoft.VisualBasic.Interaction]::InputBox('커밋 메시지를 입력하세요.','Git Local - 커밋',$defaultMessage) }
+        else { $message = [Microsoft.VisualBasic.Interaction]::InputBox('로컬 변경사항을 기록할 커밋 메시지를 입력하세요.','Git Local - 로컬 → GitHub',$defaultMessage) }
         if ([string]::IsNullOrWhiteSpace($message)) { return }
-        Write-Log ("커밋/푸시 시작: " + $p.name)
+        Write-Log ("로컬 → GitHub 시작: " + $p.name)
         $r = Publish-GitLocalProject -Project $p -CommitMessage $message
-        if ($r.Result -eq 'no-changes') { Write-Log '변경사항이 없어 커밋하지 않았습니다.' }
-        else { Write-Log ("푸시 완료: " + $r.Branch) }
+        if ($r.Result -eq 'no-changes') { Write-Log '업로드할 새 변경사항이 없습니다. GitHub와 동기화되어 있습니다.' }
+        else { Write-Log ("GitHub 업로드 완료: " + $r.Branch) }
         Refresh-Grid
     } catch { Show-Error $_.Exception }
 })
@@ -310,11 +323,11 @@ if ($SelfTest) {
         $pushButton.PerformClick()
         [System.Windows.Forms.Application]::DoEvents()
         $remoteText = (Invoke-GitLocalGit -Arguments @("--git-dir=$remote",'show','main:README.txt')).Output
-        if ($remoteText -notmatch 'ui-local-push') { throw '커밋 + 푸시 버튼이 로컬 변경을 원격에 반영하지 못했습니다.' }
+        if ($remoteText -notmatch 'ui-local-push') { throw '로컬 → GitHub 버튼이 로컬 변경을 원격에 반영하지 못했습니다.' }
 
         $refreshButton.PerformClick()
         [System.Windows.Forms.Application]::DoEvents()
-        if ($log.Text -notmatch '등록 완료' -or $log.Text -notmatch '가져오기 완료' -or $log.Text -notmatch '푸시 완료') {
+        if ($log.Text -notmatch '등록 완료' -or $log.Text -notmatch '가져오기 완료' -or $log.Text -notmatch 'GitHub 업로드 완료') {
             throw 'UI 작업 로그에 필수 성공 이벤트가 기록되지 않았습니다.'
         }
 

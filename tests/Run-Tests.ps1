@@ -121,8 +121,61 @@ try {
     Assert-True ($pulledText -match 'remote-change') 'Remote change visible locally'
 
     Add-Content -LiteralPath (Join-Path $target 'README.txt') -Value 'dirty' -Encoding UTF8
-    Assert-Throws { Update-GitLocalProjectFromRemote -Project $reg.Project | Out-Null } 'Dirty working tree pull protection'
+    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $reg.Project | Out-Null } '커밋하지 않은 변경사항' 'Dirty working tree pull protection'
     Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('checkout','--','README.txt') | Out-Null
+
+    $currentResult = Update-GitLocalProjectFromRemote -Project $reg.Project
+    Assert-Equal $currentResult.Result 'up-to-date' 'Already-synced remote-to-local detection'
+
+    Set-Content -LiteralPath (Join-Path $target 'ahead-only.txt') -Value 'local ahead' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('commit','-m','qa: ahead only local commit') | Out-Null
+    $aheadStatus = Get-GitLocalProjectStatus -Project $reg.Project
+    Assert-Equal $aheadStatus.State 'ahead' 'Ahead-only state detection'
+    $aheadPush = Publish-GitLocalProject -Project $reg.Project -CommitMessage 'qa: push existing local commit'
+    Assert-Equal $aheadPush.Result 'pushed' 'Push existing local commit without worktree changes'
+    $remoteAhead = (Invoke-GitLocalGit -Arguments @("--git-dir=$remote",'show','main:ahead-only.txt')).Output
+    Assert-True ($remoteAhead -match 'local ahead') 'Existing local commit reached remote'
+
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('pull','--rebase','origin','main') | Out-Null
+    Set-Content -LiteralPath (Join-Path $target 'local-diverged.txt') -Value 'local side' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $target -Arguments @('commit','-m','qa: local side of divergence') | Out-Null
+    Set-Content -LiteralPath (Join-Path $seed 'remote-diverged.txt') -Value 'remote side' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','qa: remote side of divergence') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
+
+    $mergeResult = Update-GitLocalProjectFromRemote -Project $reg.Project
+    Assert-Equal $mergeResult.Result 'merged' 'Diverged non-conflicting branches auto-merge'
+    Assert-True (Test-Path -LiteralPath (Join-Path $target 'local-diverged.txt')) 'Auto-merge preserves local file'
+    Assert-True (Test-Path -LiteralPath (Join-Path $target 'remote-diverged.txt')) 'Auto-merge includes remote file'
+    $mergePush = Publish-GitLocalProject -Project $reg.Project -CommitMessage 'qa: publish merged divergence'
+    Assert-Equal $mergePush.Result 'pushed' 'Merged divergence publishes without new worktree changes'
+
+    $conflictTarget = Join-Path $base 'conflict-work'
+    Invoke-GitLocalGit -Arguments @('clone',$remote,$conflictTarget) | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('config','user.name','GitLocal QA') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('config','user.email','qa@example.invalid') | Out-Null
+    $conflictProject = [pscustomobject]@{ id='conflict'; name='conflict'; localPath=$conflictTarget; repositoryUrl=$remote; branch='main' }
+    Set-Content -LiteralPath (Join-Path $conflictTarget 'README.txt') -Value 'LOCAL CONFLICT' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('commit','-m','qa: local conflict') | Out-Null
+    $conflictLocalHead = (Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('rev-parse','HEAD')).Output.Trim()
+
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('pull','--rebase','origin','main') | Out-Null
+    Set-Content -LiteralPath (Join-Path $seed 'README.txt') -Value 'REMOTE CONFLICT' -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','qa: remote conflict') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
+
+    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $conflictProject | Out-Null } '충돌' 'Diverged conflict is reported'
+    $conflictHeadAfter = (Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('rev-parse','HEAD')).Output.Trim()
+    Assert-Equal $conflictHeadAfter $conflictLocalHead 'Conflict rollback preserves local HEAD'
+    $conflictDirty = (Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('status','--porcelain')).Output
+    Assert-True ([string]::IsNullOrWhiteSpace($conflictDirty)) 'Conflict rollback leaves clean worktree'
+    $mergeHead = Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('rev-parse','--verify','MERGE_HEAD') -AllowFailure
+    Assert-True ($mergeHead.ExitCode -ne 0) 'Conflict rollback clears MERGE_HEAD'
 
     $unicode = Register-GitLocalProject -Name '한글 프로젝트' -RepositoryUrl $remote -LocalPath $unicodeTarget
     Assert-Equal $unicode.Mode 'cloned' 'Unicode path clone'
@@ -194,7 +247,7 @@ try {
     Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
     Add-Content -LiteralPath (Join-Path $pushReject 'README.txt') -Value 'local-behind-push' -Encoding UTF8
     $pushRejectProject = [pscustomobject]@{ id='push-reject'; name='push-reject'; localPath=$pushReject; repositoryUrl=$remote; branch='main' }
-    Assert-ThrowsMatch { Publish-GitLocalProject -Project $pushRejectProject -CommitMessage 'qa: rejected push' | Out-Null } 'GitHub 푸시에 실패했습니다' 'Rejected push protection'
+    Assert-ThrowsMatch { Publish-GitLocalProject -Project $pushRejectProject -CommitMessage 'qa: rejected push' | Out-Null } '충돌' 'Diverged push conflict protection'
 
     $pullConflict = Join-Path $base 'pull-conflict'
     Invoke-GitLocalGit -Arguments @('clone',$remote,$pullConflict) | Out-Null
@@ -208,7 +261,7 @@ try {
     Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','qa: remote divergence') | Out-Null
     Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
     $pullConflictProject = [pscustomobject]@{ id='pull-conflict'; name='pull-conflict'; localPath=$pullConflict; repositoryUrl=$remote; branch='main' }
-    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $pullConflictProject | Out-Null } '분기|fast-forward' 'Diverged pull protection'
+    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $pullConflictProject | Out-Null } '충돌' 'Diverged pull conflict protection'
 
     $networkStub = Join-Path $base 'git-network-fail.cmd'
     @('@echo off','1>&2 echo fatal: unable to access https://github.com/example/repo.git/: Could not resolve host: github.com','exit /b 128') | Set-Content -LiteralPath $networkStub -Encoding ASCII
