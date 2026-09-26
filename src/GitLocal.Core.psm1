@@ -71,6 +71,45 @@ function Resolve-GitLocalNpmExecutable {
     return $npm.Source
 }
 
+function Resolve-GitLocalNodeExecutable {
+    $node = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($null -eq $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
+    if ($null -eq $node) {
+        throw 'package-lock.json 검증에 Node.js가 필요합니다. Node.js/npm을 설치한 뒤 다시 시도하세요.'
+    }
+    return $node.Source
+}
+
+function Invoke-GitLocalNode {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$WorkingDirectory,[Parameter(Mandatory=$true)][string[]]$Arguments,[switch]$AllowFailure)
+
+    if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
+        throw "Node.js 작업 폴더가 존재하지 않습니다: $WorkingDirectory"
+    }
+
+    $node = Resolve-GitLocalNodeExecutable
+    $pushed = $false
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        Push-Location -LiteralPath $WorkingDirectory
+        $pushed = $true
+        $ErrorActionPreference = 'Continue'
+        $raw = & $node @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        $output = ($raw | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($pushed) { Pop-Location }
+    }
+
+    if ($exitCode -ne 0 -and -not $AllowFailure) {
+        throw ("Node.js 명령이 실패했습니다. (exit={0}) node {1}{2}{3}" -f $exitCode,($Arguments -join ' '),[Environment]::NewLine,$output)
+    }
+    [pscustomobject]@{ ExitCode=$exitCode; Output=$output; Arguments=@($Arguments) }
+}
+
 function Invoke-GitLocalNpm {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$WorkingDirectory,[Parameter(Mandatory=$true)][string[]]$Arguments,[switch]$AllowFailure)
@@ -387,11 +426,11 @@ function Update-GitLocalProjectFromRemote {
                         throw "npm 실행 후 package-lock.json이 생성되지 않았습니다: $lockPath"
                     }
 
-                    try {
-                        Get-Content -LiteralPath $lockFullPath -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null
-                    }
-                    catch {
-                        throw "재생성된 package-lock.json이 유효한 JSON이 아닙니다: $lockPath"
+                    $jsonCheck=Invoke-GitLocalNode -WorkingDirectory $packageDir -Arguments @(
+                        '-e',"JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));",$lockFullPath
+                    ) -AllowFailure
+                    if ($jsonCheck.ExitCode -ne 0) {
+                        throw ("재생성된 package-lock.json JSON 검증에 실패했습니다: {0}{1}{2}" -f $lockPath,[Environment]::NewLine,$jsonCheck.Output)
                     }
 
                     Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('add','--',$lockPath) | Out-Null
@@ -496,7 +535,7 @@ function Publish-GitLocalProject {
 
 Export-ModuleMember -Function @(
     'Get-GitLocalConfigRoot','Get-GitLocalConfigFile','Resolve-GitLocalGitExecutable','Invoke-GitLocalGit',
-    'Resolve-GitLocalNpmExecutable','Invoke-GitLocalNpm',
+    'Resolve-GitLocalNpmExecutable','Resolve-GitLocalNodeExecutable','Invoke-GitLocalNode','Invoke-GitLocalNpm',
     'Resolve-GitLocalRepositoryUrl','Test-GitLocalRemoteAccess','Get-GitLocalProjects','Get-GitLocalProject',
     'Register-GitLocalProject','Remove-GitLocalProject','Get-GitLocalProjectStatus',
     'Update-GitLocalProjectFromRemote','Publish-GitLocalProject'
