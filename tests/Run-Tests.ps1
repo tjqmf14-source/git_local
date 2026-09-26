@@ -228,9 +228,12 @@ try {
     Assert-Equal $lockMerge.Result 'merged-lockfile' 'Package-lock-only conflict auto-regeneration'
     Assert-Equal @($lockMerge.AutoResolved).Count 1 'Package-lock auto-resolve file count'
     Assert-Equal ([System.IO.Path]::GetFileName([string]$lockMerge.AutoResolved[0])) 'package-lock.json' 'Package-lock auto-resolve file identity'
-    $regeneratedLock = Get-Content -LiteralPath (Join-Path $lockTarget 'package-lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-True ($regeneratedLock.lockfileVersion -ge 2) 'Regenerated package-lock parses as npm lockfile'
-    Assert-True ($regeneratedLock.PSObject.Properties.Name -notcontains 'qaMarker') 'Regenerated package-lock removes conflicting synthetic marker'
+    $lockJsonCheck = Invoke-GitLocalNode -WorkingDirectory $lockTarget -Arguments @(
+        '-e',"const j=JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')); if ((j.lockfileVersion || 0) < 2) process.exit(2);",(Join-Path $lockTarget 'package-lock.json')
+    ) -AllowFailure
+    Assert-Equal $lockJsonCheck.ExitCode 0 'Regenerated package-lock parses as npm lockfile'
+    $regeneratedLockText = Get-Content -LiteralPath (Join-Path $lockTarget 'package-lock.json') -Raw -Encoding UTF8
+    Assert-True ($regeneratedLockText -notmatch '"qaMarker"') 'Regenerated package-lock removes conflicting synthetic marker'
     $lockDirty = (Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('status','--porcelain')).Output
     Assert-True ([string]::IsNullOrWhiteSpace($lockDirty)) 'Package-lock recovery leaves clean worktree'
     $lockMergeHead = Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('rev-parse','--verify','MERGE_HEAD') -AllowFailure
