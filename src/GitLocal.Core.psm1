@@ -62,6 +62,84 @@ function Invoke-GitLocalGit {
     [pscustomobject]@{ ExitCode=$exitCode; Output=$output; Arguments=@($Arguments) }
 }
 
+function Resolve-GitLocalNpmExecutable {
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if ($null -eq $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
+    if ($null -eq $npm) {
+        throw 'package-lock.json 자동 복구에 npm이 필요합니다. Node.js/npm을 설치한 뒤 다시 시도하세요.'
+    }
+    return $npm.Source
+}
+
+function Resolve-GitLocalNodeExecutable {
+    $node = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($null -eq $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
+    if ($null -eq $node) {
+        throw 'package-lock.json 검증에 Node.js가 필요합니다. Node.js/npm을 설치한 뒤 다시 시도하세요.'
+    }
+    return $node.Source
+}
+
+function Invoke-GitLocalNode {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$WorkingDirectory,[Parameter(Mandatory=$true)][string[]]$Arguments,[switch]$AllowFailure)
+
+    if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
+        throw "Node.js 작업 폴더가 존재하지 않습니다: $WorkingDirectory"
+    }
+
+    $node = Resolve-GitLocalNodeExecutable
+    $pushed = $false
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        Push-Location -LiteralPath $WorkingDirectory
+        $pushed = $true
+        $ErrorActionPreference = 'Continue'
+        $raw = & $node @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        $output = ($raw | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($pushed) { Pop-Location }
+    }
+
+    if ($exitCode -ne 0 -and -not $AllowFailure) {
+        throw ("Node.js 명령이 실패했습니다. (exit={0}) node {1}{2}{3}" -f $exitCode,($Arguments -join ' '),[Environment]::NewLine,$output)
+    }
+    [pscustomobject]@{ ExitCode=$exitCode; Output=$output; Arguments=@($Arguments) }
+}
+
+function Invoke-GitLocalNpm {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$WorkingDirectory,[Parameter(Mandatory=$true)][string[]]$Arguments,[switch]$AllowFailure)
+
+    if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
+        throw "npm 작업 폴더가 존재하지 않습니다: $WorkingDirectory"
+    }
+
+    $npm = Resolve-GitLocalNpmExecutable
+    $pushed = $false
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        Push-Location -LiteralPath $WorkingDirectory
+        $pushed = $true
+        $ErrorActionPreference = 'Continue'
+        $raw = & $npm @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        $output = ($raw | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($pushed) { Pop-Location }
+    }
+
+    if ($exitCode -ne 0 -and -not $AllowFailure) {
+        throw ("npm 명령이 실패했습니다. (exit={0}) npm {1}{2}{3}" -f $exitCode,($Arguments -join ' '),[Environment]::NewLine,$output)
+    }
+    [pscustomobject]@{ ExitCode=$exitCode; Output=$output; Arguments=@($Arguments) }
+}
+
 function Resolve-GitLocalRepositoryUrl {
     [CmdletBinding()]
     param([Parameter(Mandatory=$true)][string]$RepositoryUrl)
@@ -314,6 +392,78 @@ function Update-GitLocalProjectFromRemote {
     $merge=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('merge','--no-edit','--no-ff','-m',$mergeMessage,"origin/$branch") -AllowFailure
     if ($merge.ExitCode -ne 0) {
         $conflicts=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('diff','--name-only','--diff-filter=U') -AllowFailure).Output.Trim()
+        $conflictPaths=@()
+        if (-not [string]::IsNullOrWhiteSpace($conflicts)) {
+            $conflictPaths=@($conflicts -split '[\r\n]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
+        }
+
+        $nonLockConflicts=@($conflictPaths | Where-Object { [System.IO.Path]::GetFileName($_) -ne 'package-lock.json' })
+        if ($conflictPaths.Count -gt 0 -and $nonLockConflicts.Count -eq 0) {
+            $lockRecoveryError=$null
+            try {
+                foreach ($lockPath in $conflictPaths) {
+                    $nativeLockPath=$lockPath -replace '/','\'
+                    $relativeDir=Split-Path -Parent $nativeLockPath
+                    $packageDir=if ([string]::IsNullOrWhiteSpace($relativeDir)) { $path } else { Join-Path $path $relativeDir }
+                    $packageJson=Join-Path $packageDir 'package.json'
+                    $lockFullPath=Join-Path $path $nativeLockPath
+
+                    if (-not (Test-Path -LiteralPath $packageJson -PathType Leaf)) {
+                        throw "package-lock.json과 같은 폴더에 package.json이 없습니다: $lockPath"
+                    }
+
+                    if (Test-Path -LiteralPath $lockFullPath -PathType Leaf) {
+                        Remove-Item -LiteralPath $lockFullPath -Force
+                    }
+
+                    $npmResult=Invoke-GitLocalNpm -WorkingDirectory $packageDir -Arguments @(
+                        'install','--package-lock-only','--ignore-scripts','--no-audit','--no-fund','--prefer-offline'
+                    ) -AllowFailure
+                    if ($npmResult.ExitCode -ne 0) {
+                        throw ("npm으로 package-lock.json 재생성에 실패했습니다: {0}{1}{2}" -f $lockPath,[Environment]::NewLine,$npmResult.Output)
+                    }
+                    if (-not (Test-Path -LiteralPath $lockFullPath -PathType Leaf)) {
+                        throw "npm 실행 후 package-lock.json이 생성되지 않았습니다: $lockPath"
+                    }
+
+                    $jsonCheck=Invoke-GitLocalNode -WorkingDirectory $packageDir -Arguments @(
+                        '-e',"JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));",$lockFullPath
+                    ) -AllowFailure
+                    if ($jsonCheck.ExitCode -ne 0) {
+                        throw ("재생성된 package-lock.json JSON 검증에 실패했습니다: {0}{1}{2}" -f $lockPath,[Environment]::NewLine,$jsonCheck.Output)
+                    }
+
+                    Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('add','--',$lockPath) | Out-Null
+                }
+
+                $remaining=(Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('diff','--name-only','--diff-filter=U') -AllowFailure).Output.Trim()
+                if (-not [string]::IsNullOrWhiteSpace($remaining)) {
+                    throw ("package-lock.json 재생성 후에도 해결되지 않은 충돌이 남아 있습니다: {0}" -f ($remaining -replace [Environment]::NewLine,', '))
+                }
+
+                $mergeCommit=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('commit','--no-edit') -AllowFailure
+                if ($mergeCommit.ExitCode -ne 0) {
+                    throw ("자동 복구된 병합 커밋 생성에 실패했습니다. Git user.name / user.email 설정을 확인하세요.{0}{1}" -f [Environment]::NewLine,$mergeCommit.Output)
+                }
+
+                return [pscustomobject]@{
+                    Result='merged-lockfile'; Branch=$branch; Ahead=$ahead; Behind=$behind; AutoResolved=@($conflictPaths)
+                }
+            }
+            catch {
+                $lockRecoveryError=$_.Exception.Message
+            }
+
+            $abortAfterLock=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('merge','--abort') -AllowFailure
+            if ($abortAfterLock.ExitCode -ne 0) {
+                $restoreAfterLock=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('reset','--merge',$headBefore) -AllowFailure
+                if ($restoreAfterLock.ExitCode -ne 0) {
+                    throw ("package-lock.json 자동 복구에 실패했고 원상 복구도 완료하지 못했습니다. 추가 작업을 중단하고 저장소를 수동 확인하세요.{0}{1}" -f [Environment]::NewLine,$lockRecoveryError)
+                }
+            }
+            throw ("package-lock.json 충돌 자동 복구에 실패해 시작 전 상태로 복구했습니다. npm/Node.js 상태와 package.json을 확인하세요.{0}{1}" -f [Environment]::NewLine,$lockRecoveryError)
+        }
+
         $abort=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('merge','--abort') -AllowFailure
         if ($abort.ExitCode -ne 0) {
             $restore=Invoke-GitLocalGit -WorkingDirectory $path -Arguments @('reset','--merge',$headBefore) -AllowFailure
@@ -322,8 +472,8 @@ function Update-GitLocalProjectFromRemote {
             }
         }
 
-        if (-not [string]::IsNullOrWhiteSpace($conflicts)) {
-            $conflictList=($conflicts -replace [Environment]::NewLine,', ')
+        if ($conflictPaths.Count -gt 0) {
+            $conflictList=($conflictPaths -join ', ')
             throw ("로컬과 GitHub 양쪽에서 같은 부분을 수정해 자동 병합할 수 없습니다. 병합 작업은 취소되어 시작 전 상태로 복구되었습니다. 파일은 삭제되지 않았습니다. 충돌 파일: {0}" -f $conflictList)
         }
         throw ("로컬과 GitHub 변경사항 자동 병합에 실패해 시작 전 상태로 복구했습니다. Git user.name / user.email 설정도 확인하세요.{0}{1}" -f [Environment]::NewLine,$merge.Output)
@@ -385,6 +535,7 @@ function Publish-GitLocalProject {
 
 Export-ModuleMember -Function @(
     'Get-GitLocalConfigRoot','Get-GitLocalConfigFile','Resolve-GitLocalGitExecutable','Invoke-GitLocalGit',
+    'Resolve-GitLocalNpmExecutable','Resolve-GitLocalNodeExecutable','Invoke-GitLocalNode','Invoke-GitLocalNpm',
     'Resolve-GitLocalRepositoryUrl','Test-GitLocalRemoteAccess','Get-GitLocalProjects','Get-GitLocalProject',
     'Register-GitLocalProject','Remove-GitLocalProject','Get-GitLocalProjectStatus',
     'Update-GitLocalProjectFromRemote','Publish-GitLocalProject'

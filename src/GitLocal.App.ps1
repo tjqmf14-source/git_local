@@ -112,7 +112,7 @@ $openButton = New-ActionButton '폴더 열기'
 $removeButton = New-ActionButton '등록 삭제'
 
 $toolTip = New-Object System.Windows.Forms.ToolTip
-$toolTip.SetToolTip($pullButton,'GitHub의 최신 변경사항을 로컬에 안전하게 반영합니다. 충돌 시 원래 상태로 복구합니다.')
+$toolTip.SetToolTip($pullButton,'GitHub의 최신 변경사항을 안전하게 반영합니다. package-lock.json 단독 충돌은 자동 재생성하고, 다른 충돌은 원래 상태로 복구합니다.')
 $toolTip.SetToolTip($pushButton,'로컬 변경사항을 커밋하고 GitHub에 업로드합니다. 이미 만든 로컬 커밋도 전송합니다.')
 
 $log = New-Object System.Windows.Forms.TextBox
@@ -188,6 +188,7 @@ $pullButton.Add_Click({
             'up-to-date' { '이미 최신 상태입니다.' }
             'pulled' { 'GitHub의 새 커밋을 로컬에 반영했습니다.' }
             'merged' { '양쪽 변경사항을 자동 병합했습니다. 로컬 → GitHub를 눌러 병합 결과를 업로드하세요.' }
+            'merged-lockfile' { 'package-lock.json 충돌을 안전하게 재생성해 병합했습니다. 로컬 → GitHub를 눌러 병합 결과를 업로드하세요.' }
             'local-ahead' { '로컬 커밋이 GitHub보다 앞서 있습니다. 로컬 → GitHub를 눌러 업로드하세요.' }
             'checked-out' { 'GitHub 브랜치를 로컬에 연결했습니다.' }
             'no-remote-branch' { 'GitHub에 같은 브랜치가 없습니다. 로컬 → GitHub로 새 브랜치를 올릴 수 있습니다.' }
@@ -291,6 +292,7 @@ if ($SelfTest) {
         foreach ($button in $buttons) {
             if (-not $button.IsHandleCreated) { throw "UI 버튼 핸들이 생성되지 않았습니다: $($button.Text)" }
         }
+        if ($pushButton.Text -ne '로컬 → GitHub') { throw '로컬 → GitHub 버튼명이 올바르지 않습니다.' }
 
         $refreshButton.PerformClick()
         [System.Windows.Forms.Application]::DoEvents()

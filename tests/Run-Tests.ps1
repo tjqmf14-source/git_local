@@ -177,6 +177,70 @@ try {
     $mergeHead = Invoke-GitLocalGit -WorkingDirectory $conflictTarget -Arguments @('rev-parse','--verify','MERGE_HEAD') -AllowFailure
     Assert-True ($mergeHead.ExitCode -ne 0) 'Conflict rollback clears MERGE_HEAD'
 
+    $lockRemote = Join-Path $base 'lock-remote.git'
+    $lockSeed = Join-Path $base 'lock-seed'
+    $lockTarget = Join-Path $base 'lock-work'
+    Invoke-GitLocalGit -Arguments @('init','--bare',$lockRemote) | Out-Null
+    New-Item -ItemType Directory -Path $lockSeed -Force | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('init','-b','main') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('config','user.name','GitLocal QA') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('config','user.email','qa@example.invalid') | Out-Null
+    Set-Content -LiteralPath (Join-Path $lockSeed 'package.json') -Encoding UTF8 -Value '{"name":"lock-conflict-qa","version":"1.0.0","private":true}'
+    @'
+{
+  "name": "lock-conflict-qa",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "qaMarker": "base",
+  "packages": {
+    "": {
+      "name": "lock-conflict-qa",
+      "version": "1.0.0"
+    }
+  }
+}
+'@ | Set-Content -LiteralPath (Join-Path $lockSeed 'package-lock.json') -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('add','-A') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('commit','-m','qa: initial lockfile') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('remote','add','origin',$lockRemote) | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('push','-u','origin','main') | Out-Null
+    Invoke-GitLocalGit -Arguments @("--git-dir=$lockRemote",'symbolic-ref','HEAD','refs/heads/main') | Out-Null
+    Invoke-GitLocalGit -Arguments @('clone',$lockRemote,$lockTarget) | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('config','user.name','GitLocal QA') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('config','user.email','qa@example.invalid') | Out-Null
+    $lockProject = [pscustomobject]@{ id='lock'; name='lock'; localPath=$lockTarget; repositoryUrl=$lockRemote; branch='main' }
+
+    $localLock = Get-Content -LiteralPath (Join-Path $lockTarget 'package-lock.json') -Raw -Encoding UTF8
+    $localLock = $localLock.Replace('"qaMarker": "base"','"qaMarker": "local"')
+    Set-Content -LiteralPath (Join-Path $lockTarget 'package-lock.json') -Value $localLock -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('add','package-lock.json') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('commit','-m','qa: local lockfile change') | Out-Null
+
+    $remoteLock = Get-Content -LiteralPath (Join-Path $lockSeed 'package-lock.json') -Raw -Encoding UTF8
+    $remoteLock = $remoteLock.Replace('"qaMarker": "base"','"qaMarker": "remote"')
+    Set-Content -LiteralPath (Join-Path $lockSeed 'package-lock.json') -Value $remoteLock -Encoding UTF8
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('add','package-lock.json') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('commit','-m','qa: remote lockfile change') | Out-Null
+    Invoke-GitLocalGit -WorkingDirectory $lockSeed -Arguments @('push','origin','main') | Out-Null
+
+    $lockMerge = Update-GitLocalProjectFromRemote -Project $lockProject
+    Assert-Equal $lockMerge.Result 'merged-lockfile' 'Package-lock-only conflict auto-regeneration'
+    Assert-Equal @($lockMerge.AutoResolved).Count 1 'Package-lock auto-resolve file count'
+    Assert-Equal ([System.IO.Path]::GetFileName([string]$lockMerge.AutoResolved[0])) 'package-lock.json' 'Package-lock auto-resolve file identity'
+    $lockJsonCheck = Invoke-GitLocalNode -WorkingDirectory $lockTarget -Arguments @(
+        '-e',"const j=JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')); if ((j.lockfileVersion || 0) < 2) process.exit(2);",(Join-Path $lockTarget 'package-lock.json')
+    ) -AllowFailure
+    Assert-Equal $lockJsonCheck.ExitCode 0 'Regenerated package-lock parses as npm lockfile'
+    $regeneratedLockText = Get-Content -LiteralPath (Join-Path $lockTarget 'package-lock.json') -Raw -Encoding UTF8
+    Assert-True ($regeneratedLockText -notmatch '"qaMarker"') 'Regenerated package-lock removes conflicting synthetic marker'
+    $lockDirty = (Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('status','--porcelain')).Output
+    Assert-True ([string]::IsNullOrWhiteSpace($lockDirty)) 'Package-lock recovery leaves clean worktree'
+    $lockMergeHead = Invoke-GitLocalGit -WorkingDirectory $lockTarget -Arguments @('rev-parse','--verify','MERGE_HEAD') -AllowFailure
+    Assert-True ($lockMergeHead.ExitCode -ne 0) 'Package-lock recovery completes merge commit'
+    $lockPush = Publish-GitLocalProject -Project $lockProject -CommitMessage 'qa: publish regenerated lockfile merge'
+    Assert-Equal $lockPush.Result 'pushed' 'Package-lock recovery merge publishes to remote'
+
     $unicode = Register-GitLocalProject -Name '한글 프로젝트' -RepositoryUrl $remote -LocalPath $unicodeTarget
     Assert-Equal $unicode.Mode 'cloned' 'Unicode path clone'
     Assert-True (Test-Path -LiteralPath (Join-Path $unicodeTarget 'README.txt')) 'Unicode path content'
