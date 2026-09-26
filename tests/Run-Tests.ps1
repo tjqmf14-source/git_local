@@ -247,7 +247,7 @@ try {
     Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
     Add-Content -LiteralPath (Join-Path $pushReject 'README.txt') -Value 'local-behind-push' -Encoding UTF8
     $pushRejectProject = [pscustomobject]@{ id='push-reject'; name='push-reject'; localPath=$pushReject; repositoryUrl=$remote; branch='main' }
-    Assert-ThrowsMatch { Publish-GitLocalProject -Project $pushRejectProject -CommitMessage 'qa: rejected push' | Out-Null } 'GitHub 푸시에 실패했습니다' 'Rejected push protection'
+    Assert-ThrowsMatch { Publish-GitLocalProject -Project $pushRejectProject -CommitMessage 'qa: rejected push' | Out-Null } '충돌' 'Diverged push conflict protection'
 
     $pullConflict = Join-Path $base 'pull-conflict'
     Invoke-GitLocalGit -Arguments @('clone',$remote,$pullConflict) | Out-Null
@@ -261,7 +261,7 @@ try {
     Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('commit','-m','qa: remote divergence') | Out-Null
     Invoke-GitLocalGit -WorkingDirectory $seed -Arguments @('push','origin','main') | Out-Null
     $pullConflictProject = [pscustomobject]@{ id='pull-conflict'; name='pull-conflict'; localPath=$pullConflict; repositoryUrl=$remote; branch='main' }
-    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $pullConflictProject | Out-Null } '분기|fast-forward' 'Diverged pull protection'
+    Assert-ThrowsMatch { Update-GitLocalProjectFromRemote -Project $pullConflictProject | Out-Null } '충돌' 'Diverged pull conflict protection'
 
     $networkStub = Join-Path $base 'git-network-fail.cmd'
     @('@echo off','1>&2 echo fatal: unable to access https://github.com/example/repo.git/: Could not resolve host: github.com','exit /b 128') | Set-Content -LiteralPath $networkStub -Encoding ASCII
